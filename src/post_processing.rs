@@ -1,5 +1,7 @@
 use macroquad::prelude::*;
 
+use crate::visual::VisualSettings;
+
 /// Simple bloom post-processing using render targets.
 /// Renders the scene to an offscreen target, extracts bright pixels,
 /// blurs them at half resolution, and composites additively.
@@ -86,10 +88,17 @@ varying lowp vec2 uv;
 uniform sampler2D Texture;
 uniform sampler2D bloom_texture;
 uniform float bloom_intensity;
+uniform float grade_strength;
+uniform float vignette_strength;
+uniform vec3 grade_tint;
 void main() {
     vec4 scene = texture2D(Texture, uv);
     vec4 bloom = texture2D(bloom_texture, uv);
-    gl_FragColor = scene + bloom * bloom_intensity;
+    vec3 graded = mix(scene.rgb, scene.rgb * grade_tint, grade_strength);
+    vec2 p = uv * 2.0 - 1.0;
+    float vignette = clamp(1.0 - dot(p, p) * vignette_strength, 0.0, 1.0);
+    vec3 composed = (graded + bloom.rgb * bloom_intensity) * vignette;
+    gl_FragColor = vec4(composed, scene.a);
 }
 "#;
 
@@ -118,12 +127,11 @@ impl BloomPipeline {
                 fragment: BRIGHT_EXTRACT_FRAG,
             },
             MaterialParams {
-                uniforms: vec![
-                    UniformDesc::new("threshold", UniformType::Float1),
-                ],
+                uniforms: vec![UniformDesc::new("threshold", UniformType::Float1)],
                 ..Default::default()
             },
-        ).ok()?;
+        )
+        .ok()?;
 
         let blur_h_material = load_material(
             ShaderSource::Glsl {
@@ -131,12 +139,11 @@ impl BloomPipeline {
                 fragment: BLUR_H_FRAG,
             },
             MaterialParams {
-                uniforms: vec![
-                    UniformDesc::new("texel_size", UniformType::Float2),
-                ],
+                uniforms: vec![UniformDesc::new("texel_size", UniformType::Float2)],
                 ..Default::default()
             },
-        ).ok()?;
+        )
+        .ok()?;
 
         let blur_v_material = load_material(
             ShaderSource::Glsl {
@@ -144,12 +151,11 @@ impl BloomPipeline {
                 fragment: BLUR_V_FRAG,
             },
             MaterialParams {
-                uniforms: vec![
-                    UniformDesc::new("texel_size", UniformType::Float2),
-                ],
+                uniforms: vec![UniformDesc::new("texel_size", UniformType::Float2)],
                 ..Default::default()
             },
-        ).ok()?;
+        )
+        .ok()?;
 
         let combine_material = load_material(
             ShaderSource::Glsl {
@@ -159,11 +165,15 @@ impl BloomPipeline {
             MaterialParams {
                 uniforms: vec![
                     UniformDesc::new("bloom_intensity", UniformType::Float1),
+                    UniformDesc::new("grade_strength", UniformType::Float1),
+                    UniformDesc::new("vignette_strength", UniformType::Float1),
+                    UniformDesc::new("grade_tint", UniformType::Float3),
                 ],
                 textures: vec!["bloom_texture".to_string()],
                 ..Default::default()
             },
-        ).ok()?;
+        )
+        .ok()?;
 
         Some(Self {
             scene_target,
@@ -179,27 +189,13 @@ impl BloomPipeline {
         })
     }
 
-    /// Call before drawing the scene to redirect rendering to the offscreen target.
-    pub fn begin_scene(&self) -> Camera2D {
-        // Return a screen-space camera for the render target
-        Camera2D {
-            render_target: Some(self.scene_target.clone()),
-            ..Camera2D::from_display_rect(Rect::new(
-                0.0,
-                0.0,
-                screen_width(),
-                screen_height(),
-            ))
-        }
-    }
-
     /// Get the render target for the world camera to render into.
     pub fn scene_render_target(&self) -> RenderTarget {
         self.scene_target.clone()
     }
 
     /// Process the rendered scene: extract bright, blur, combine.
-    pub fn apply(&self) {
+    pub fn apply(&self, visual_settings: VisualSettings) {
         let half_w = self.width as f32 / 2.0;
         let half_h = self.height as f32 / 2.0;
 
@@ -209,11 +205,13 @@ impl BloomPipeline {
             ..Camera2D::from_display_rect(Rect::new(0.0, 0.0, half_w, half_h))
         });
         clear_background(BLACK);
-        self.bright_material.set_uniform("threshold", 0.6f32);
+        self.bright_material
+            .set_uniform("threshold", visual_settings.bloom_threshold());
         gl_use_material(&self.bright_material);
         draw_texture_ex(
             &self.scene_target.texture,
-            0.0, 0.0,
+            0.0,
+            0.0,
             WHITE,
             DrawTextureParams {
                 dest_size: Some(vec2(half_w, half_h)),
@@ -228,11 +226,13 @@ impl BloomPipeline {
             ..Camera2D::from_display_rect(Rect::new(0.0, 0.0, half_w, half_h))
         });
         clear_background(BLACK);
-        self.blur_h_material.set_uniform("texel_size", vec2(1.0 / half_w, 1.0 / half_h));
+        self.blur_h_material
+            .set_uniform("texel_size", vec2(1.0 / half_w, 1.0 / half_h));
         gl_use_material(&self.blur_h_material);
         draw_texture_ex(
             &self.bright_target.texture,
-            0.0, 0.0,
+            0.0,
+            0.0,
             WHITE,
             DrawTextureParams {
                 dest_size: Some(vec2(half_w, half_h)),
@@ -247,11 +247,13 @@ impl BloomPipeline {
             ..Camera2D::from_display_rect(Rect::new(0.0, 0.0, half_w, half_h))
         });
         clear_background(BLACK);
-        self.blur_v_material.set_uniform("texel_size", vec2(1.0 / half_w, 1.0 / half_h));
+        self.blur_v_material
+            .set_uniform("texel_size", vec2(1.0 / half_w, 1.0 / half_h));
         gl_use_material(&self.blur_v_material);
         draw_texture_ex(
             &self.blur_h_target.texture,
-            0.0, 0.0,
+            0.0,
+            0.0,
             WHITE,
             DrawTextureParams {
                 dest_size: Some(vec2(half_w, half_h)),
@@ -262,12 +264,21 @@ impl BloomPipeline {
 
         // Step 4: Combine scene + bloom
         set_default_camera();
-        self.combine_material.set_uniform("bloom_intensity", 0.4f32);
-        self.combine_material.set_texture("bloom_texture", self.blur_v_target.texture.clone());
+        self.combine_material
+            .set_uniform("bloom_intensity", visual_settings.bloom_intensity());
+        self.combine_material
+            .set_uniform("grade_strength", visual_settings.grade_strength());
+        self.combine_material
+            .set_uniform("vignette_strength", visual_settings.vignette_strength());
+        self.combine_material
+            .set_uniform("grade_tint", visual_settings.grade_tint());
+        self.combine_material
+            .set_texture("bloom_texture", self.blur_v_target.texture.clone());
         gl_use_material(&self.combine_material);
         draw_texture_ex(
             &self.scene_target.texture,
-            0.0, 0.0,
+            0.0,
+            0.0,
             WHITE,
             DrawTextureParams {
                 dest_size: Some(vec2(screen_width(), screen_height())),

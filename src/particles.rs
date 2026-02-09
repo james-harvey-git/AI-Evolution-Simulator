@@ -50,8 +50,8 @@ impl ParticleSystem {
                 self.particles.remove(0);
             }
 
-            let angle = (i as f32 / count as f32) * std::f32::consts::TAU
-                + rand::gen_range(-0.3, 0.3);
+            let angle =
+                (i as f32 / count as f32) * std::f32::consts::TAU + rand::gen_range(-0.3, 0.3);
             let spd = speed * rand::gen_range(0.4, 1.0);
             let vel = Vec2::from_angle(angle) * spd;
 
@@ -89,5 +89,29 @@ impl ParticleSystem {
 
     pub fn count(&self) -> usize {
         self.particles.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn particle_system_caps_total_particles() {
+        let mut particles = ParticleSystem::new();
+        for _ in 0..100 {
+            particles.emit_birth(vec2(0.0, 0.0));
+        }
+        assert!(particles.count() <= MAX_PARTICLES);
+    }
+
+    #[test]
+    fn particle_update_removes_expired_particles() {
+        let mut particles = ParticleSystem::new();
+        particles.emit_eat(vec2(10.0, 10.0));
+        assert!(particles.count() > 0);
+
+        particles.update(2.0);
+        assert_eq!(particles.count(), 0);
     }
 }

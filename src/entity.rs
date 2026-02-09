@@ -16,6 +16,7 @@ pub struct Entity {
     pub radius: f32,
     pub color: Color,
     pub energy: f32,
+    pub carried_energy: f32,
     pub health: f32,
     pub max_health: f32,
     pub age: f32,
@@ -42,6 +43,7 @@ impl Entity {
             radius: crate::config::ENTITY_BASE_RADIUS * size,
             color: genome.body_color(),
             energy: crate::config::INITIAL_ENTITY_ENERGY,
+            carried_energy: 0.0,
             health: max_health,
             max_health,
             age: 0.0,
@@ -170,13 +172,69 @@ impl EntityArena {
 
     /// Iterate over (index, &Entity) for all alive entities.
     pub fn iter_alive(&self) -> impl Iterator<Item = (usize, &Entity)> {
-        self.entities
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| slot.as_ref().map(|e| (i, e)))
+        self.entities.iter().enumerate().filter_map(|(i, slot)| {
+            slot.as_ref()
+                .and_then(|e| if e.alive { Some((i, e)) } else { None })
+        })
     }
 
     pub fn capacity(&self) -> usize {
         self.entities.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_entity(pos: Vec2) -> Entity {
+        Entity {
+            pos,
+            prev_pos: pos,
+            velocity: Vec2::ZERO,
+            heading: 0.0,
+            radius: 8.0,
+            color: WHITE,
+            energy: 100.0,
+            carried_energy: 0.0,
+            health: 100.0,
+            max_health: 100.0,
+            age: 0.0,
+            alive: true,
+            speed_multiplier: 1.0,
+            sensor_range: 1.0,
+            metabolic_rate: 1.0,
+            generation_depth: 0,
+            parent_id: None,
+            offspring_count: 0,
+            tick_born: 0,
+        }
+    }
+
+    #[test]
+    fn generational_handles_invalidate_after_despawn() {
+        let mut arena = EntityArena::new(1);
+        let id_a = arena.spawn(test_entity(vec2(0.0, 0.0))).unwrap();
+        assert!(arena.get(id_a).is_some());
+
+        assert!(arena.despawn(id_a));
+        assert!(arena.get(id_a).is_none());
+
+        let id_b = arena.spawn(test_entity(vec2(1.0, 0.0))).unwrap();
+        assert_eq!(id_a.index, id_b.index);
+        assert_ne!(id_a.generation, id_b.generation);
+    }
+
+    #[test]
+    fn iter_alive_skips_marked_dead_entities() {
+        let mut arena = EntityArena::new(2);
+        let id_alive = arena.spawn(test_entity(vec2(0.0, 0.0))).unwrap();
+        let id_dead = arena.spawn(test_entity(vec2(1.0, 0.0))).unwrap();
+
+        arena.get_mut(id_dead).unwrap().alive = false;
+
+        let alive_indices: Vec<usize> = arena.iter_alive().map(|(idx, _)| idx).collect();
+        assert_eq!(alive_indices, vec![id_alive.index as usize]);
+        assert_eq!(arena.capacity(), 2);
     }
 }

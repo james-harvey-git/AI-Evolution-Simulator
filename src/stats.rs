@@ -89,7 +89,12 @@ impl SimStats {
         avg_energy: f32,
         food_count: usize,
         avg_generation: f32,
+        births_this_tick: u32,
+        deaths_this_tick: u32,
     ) {
+        self.births_this_tick += births_this_tick;
+        self.deaths_this_tick += deaths_this_tick;
+
         self.tick_counter += 1;
         if self.tick_counter % self.sample_interval != 0 {
             return;
@@ -104,5 +109,41 @@ impl SimStats {
 
         self.births_this_tick = 0;
         self.deaths_this_tick = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_buffer_iterates_in_insertion_order_after_wrap() {
+        let mut buf = RingBuffer::new(3);
+        buf.push(1.0);
+        buf.push(2.0);
+        buf.push(3.0);
+        buf.push(4.0);
+
+        let values: Vec<f32> = buf.iter().collect();
+        assert_eq!(values, vec![2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn stats_aggregate_births_and_deaths_between_samples() {
+        let mut stats = SimStats::new(8);
+        stats.sample_interval = 2;
+
+        stats.record(10, 50.0, 20, 1.0, 3, 1);
+        assert_eq!(stats.births.len(), 0);
+        assert_eq!(stats.deaths.len(), 0);
+
+        stats.record(11, 49.0, 19, 1.1, 2, 4);
+
+        let births: Vec<f32> = stats.births.iter().collect();
+        let deaths: Vec<f32> = stats.deaths.iter().collect();
+        assert_eq!(births, vec![5.0]);
+        assert_eq!(deaths, vec![5.0]);
+        assert_eq!(stats.births_this_tick, 0);
+        assert_eq!(stats.deaths_this_tick, 0);
     }
 }

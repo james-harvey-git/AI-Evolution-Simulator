@@ -21,7 +21,11 @@ pub fn draw_minimap(ctx: &egui::Context, sim: &SimState, camera: &CameraControll
             let rect = response.rect;
 
             // Background
-            painter.rect_filled(rect, 2.0, egui::Color32::from_rgba_unmultiplied(10, 15, 25, 220));
+            painter.rect_filled(
+                rect,
+                2.0,
+                egui::Color32::from_rgba_unmultiplied(10, 15, 25, 220),
+            );
 
             let world_w = sim.world.width;
             let world_h = sim.world.height;
@@ -57,6 +61,25 @@ pub fn draw_minimap(ctx: &egui::Context, sim: &SimState, camera: &CameraControll
                 painter.circle_filled(p, 2.0, color);
             }
 
+            for wall in &sim.environment.walls {
+                let a = to_minimap(wall.start);
+                let b = to_minimap(wall.end);
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(1.5, egui::Color32::from_gray(170)),
+                );
+            }
+
+            for zone in &sim.environment.toxic_zones {
+                let c = to_minimap(zone.center);
+                let r = (zone.radius / world_w) * MINIMAP_SIZE;
+                painter.circle_stroke(
+                    c,
+                    r,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(220, 60, 70, 120)),
+                );
+            }
+
             // Draw storm
             if let Some(ref storm) = sim.environment.storm {
                 let center = to_minimap(storm.center);
@@ -65,7 +88,10 @@ pub fn draw_minimap(ctx: &egui::Context, sim: &SimState, camera: &CameraControll
                     center,
                     r,
                     egui::Color32::from_rgba_unmultiplied(100, 100, 150, 60),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(150, 150, 200, 100)),
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(150, 150, 200, 100),
+                    ),
                 );
             }
 
@@ -80,7 +106,10 @@ pub fn draw_minimap(ctx: &egui::Context, sim: &SimState, camera: &CameraControll
             painter.rect_stroke(
                 cam_rect,
                 0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 120)),
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 120),
+                ),
                 egui::StrokeKind::Outside,
             );
 

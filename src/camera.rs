@@ -76,7 +76,8 @@ impl CameraController {
         let (_, scroll_y) = mouse_wheel();
         if scroll_y != 0.0 {
             let zoom_factor = 1.0 + scroll_y.signum() * config::CAMERA_ZOOM_SPEED;
-            self.zoom = (self.zoom * zoom_factor).clamp(config::CAMERA_ZOOM_MIN, config::CAMERA_ZOOM_MAX);
+            self.zoom =
+                (self.zoom * zoom_factor).clamp(config::CAMERA_ZOOM_MIN, config::CAMERA_ZOOM_MAX);
         }
 
         // Smooth interpolation

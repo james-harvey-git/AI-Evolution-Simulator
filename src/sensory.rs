@@ -2,7 +2,8 @@ use macroquad::prelude::*;
 
 use crate::config;
 use crate::entity::EntityArena;
-use crate::environment::{EnvironmentState, TerrainType};
+use crate::environment::{closest_point_on_segment, point_near_any_wall, EnvironmentState};
+use crate::signals::{PheromoneGrid, SignalState};
 use crate::spatial_hash::SpatialHash;
 use crate::world::World;
 
@@ -13,6 +14,7 @@ pub enum HitType {
     Entity,
     Food,
     Wall,
+    Hazard,
 }
 
 /// Result of a single raycast.
@@ -20,6 +22,7 @@ pub enum HitType {
 pub struct RayHit {
     pub distance_norm: f32, // [0, 1] where 0 = at origin, 1 = max range (nothing hit)
     pub hit_type: HitType,
+    pub entity_idx: Option<usize>,
 }
 
 /// Per-entity ray data for visualization.
@@ -34,11 +37,17 @@ pub struct EntityRays {
 pub fn compute_all_sensors(
     arena: &EntityArena,
     food_positions: &[Vec2],
+    meat_positions: &[Vec2],
+    signals: &[SignalState],
+    pheromones: &PheromoneGrid,
     spatial: &SpatialHash,
     world: &World,
     environment: &EnvironmentState,
     collect_rays: bool,
-) -> (Vec<[f32; config::BRAIN_SENSOR_NEURONS]>, Vec<Option<EntityRays>>) {
+) -> (
+    Vec<[f32; config::BRAIN_SENSOR_NEURONS]>,
+    Vec<Option<EntityRays>>,
+) {
     let capacity = arena.entities.len();
     let mut all_inputs = vec![[0.0f32; config::BRAIN_SENSOR_NEURONS]; capacity];
     let mut all_rays: Vec<Option<EntityRays>> = if collect_rays {
@@ -52,23 +61,26 @@ pub fn compute_all_sensors(
             Some(e) => e,
             None => continue,
         };
+        if !entity.alive {
+            continue;
+        }
 
         let ray_length = config::SENSOR_RAY_LENGTH * entity.sensor_range;
         let num_rays = config::NUM_SENSOR_RAYS;
         let arc = config::SENSOR_ARC;
-        let step_angle = arc / (num_rays - 1).max(1) as f32;
+        let step_angle = arc / (num_rays.saturating_sub(1).max(1)) as f32;
         let start_angle = entity.heading - arc * 0.5;
 
-        // Cast rays and collect hits
-        let mut ray_distances = [1.0f32; 8]; // default = nothing hit
-        let mut ray_types = [HitType::Nothing; 8];
+        let mut ray_distances = vec![1.0f32; num_rays];
+        let mut ray_types = vec![HitType::Nothing; num_rays];
+        let mut ray_entities: Vec<Option<usize>> = vec![None; num_rays];
         let mut ray_data = if collect_rays {
             Vec::with_capacity(num_rays)
         } else {
             Vec::new()
         };
 
-        for ray_i in 0..num_rays.min(8) {
+        for ray_i in 0..num_rays {
             let angle = start_angle + step_angle * ray_i as f32;
             let dir = Vec2::from_angle(angle);
 
@@ -79,12 +91,15 @@ pub fn compute_all_sensors(
                 idx as u32,
                 arena,
                 food_positions,
+                meat_positions,
                 spatial,
                 world,
+                environment,
             );
 
             ray_distances[ray_i] = hit.distance_norm;
             ray_types[ray_i] = hit.hit_type;
+            ray_entities[ray_i] = hit.entity_idx;
 
             if collect_rays {
                 let end = world.wrap(entity.pos + dir * ray_length * hit.distance_norm);
@@ -96,53 +111,137 @@ pub fn compute_all_sensors(
             all_rays[idx] = Some(EntityRays { rays: ray_data });
         }
 
-        // Compress 8 rays into 6 brain sensor inputs:
-        // [0]: avg proximity left side (rays 0-3), inverted: 1 = close, 0 = far
-        // [1]: avg proximity right side (rays 4-7), inverted
-        // [2]: food proximity (min distance to food ray, inverted)
-        // [3]: entity proximity (min distance to entity ray, inverted)
-        // [4]: own energy level normalized [0,1]
-        // [5]: environment signal: terrain danger + day/night combined
+        let split = num_rays / 2;
+        let left_avg = if split > 0 {
+            ray_distances[..split].iter().sum::<f32>() / split as f32
+        } else {
+            1.0
+        };
+        let right_count = num_rays.saturating_sub(split).max(1);
+        let right_avg = ray_distances[split..].iter().sum::<f32>() / right_count as f32;
 
-        let left_prox = 1.0
-            - (ray_distances[0] + ray_distances[1] + ray_distances[2] + ray_distances[3]) * 0.25;
-        let right_prox = 1.0
-            - (ray_distances[4] + ray_distances[5] + ray_distances[6] + ray_distances[7]) * 0.25;
+        let left_prox = 1.0 - left_avg;
+        let right_prox = 1.0 - right_avg;
 
         let mut food_prox = 0.0f32;
         let mut entity_prox = 0.0f32;
-        for ray_i in 0..num_rays.min(8) {
+        let mut obstacle_prox = 0.0f32;
+        let mut sensed_signal = [0.0f32; 3];
+
+        for ray_i in 0..num_rays {
             let inv_dist = 1.0 - ray_distances[ray_i];
             match ray_types[ray_i] {
                 HitType::Food => food_prox = food_prox.max(inv_dist),
-                HitType::Entity => entity_prox = entity_prox.max(inv_dist),
-                _ => {}
+                HitType::Entity => {
+                    entity_prox = entity_prox.max(inv_dist);
+                    if let Some(e_idx) = ray_entities[ray_i] {
+                        if let Some(signal) = signals.get(e_idx) {
+                            sensed_signal[0] = sensed_signal[0].max(signal.color.r * inv_dist);
+                            sensed_signal[1] = sensed_signal[1].max(signal.color.g * inv_dist);
+                            sensed_signal[2] = sensed_signal[2].max(signal.color.b * inv_dist);
+                        }
+                    }
+                }
+                HitType::Wall | HitType::Hazard => obstacle_prox = obstacle_prox.max(inv_dist),
+                HitType::Nothing => {}
             }
         }
 
         let energy_norm = (entity.energy / config::MAX_ENTITY_ENERGY).clamp(0.0, 1.0);
+        let health_norm = (entity.health / entity.max_health.max(1.0)).clamp(0.0, 1.0);
+        let age_norm = (entity.age / config::DEATH_AGE).clamp(0.0, 1.0);
+        let speed_norm = (entity.velocity.length()
+            / (config::ENTITY_MAX_SPEED * entity.speed_multiplier).max(1.0))
+        .clamp(0.0, 1.0);
+        let carried_norm = (entity.carried_energy / config::MAX_CARRIED_ENERGY).clamp(0.0, 1.0);
 
-        // Environment signal: combines terrain danger and day/night
-        // Terrain: Water=0.8, Toxic=1.0, Desert=0.4, Forest=0.2, Plains=0.0
-        // Day/night: adds 0.0 (full day) to 0.3 (full night)
-        let terrain = environment.terrain.get_at(entity.pos);
-        let terrain_danger = match terrain {
-            TerrainType::Plains => 0.0,
-            TerrainType::Forest => 0.2,
-            TerrainType::Desert => 0.4,
-            TerrainType::Water => 0.8,
-            TerrainType::Toxic => 1.0,
+        let adjacent = adjacent_contact(
+            idx as u32,
+            entity.pos,
+            arena,
+            food_positions,
+            meat_positions,
+            spatial,
+            world,
+            environment,
+        );
+
+        // Pheromone gradient projected onto current heading.
+        let grad = pheromones.gradient(entity.pos);
+        let grad_strength = grad.length().clamp(0.0, 1.0);
+        let heading = Vec2::from_angle(entity.heading);
+        let pheromone_alignment = if grad_strength > 0.0001 {
+            grad.normalize().dot(heading).clamp(-1.0, 1.0)
+        } else {
+            0.0
         };
-        let night_signal = 1.0 - environment.day_brightness(); // 0 at day, 0.7 at night
-        let env_signal = (terrain_danger * 0.7 + night_signal * 0.3).clamp(0.0, 1.0);
+        let pheromone_sensor = ((pheromone_alignment * grad_strength) + 1.0) * 0.5;
 
-        all_inputs[idx] = [left_prox, right_prox, food_prox, entity_prox, energy_norm, env_signal];
+        all_inputs[idx] = [
+            left_prox,
+            right_prox,
+            food_prox,
+            entity_prox,
+            obstacle_prox,
+            pheromone_sensor,
+            sensed_signal[0],
+            sensed_signal[1],
+            sensed_signal[2],
+            energy_norm,
+            health_norm,
+            age_norm,
+            speed_norm,
+            carried_norm,
+            if adjacent { 1.0 } else { 0.0 },
+        ];
     }
 
     (all_inputs, all_rays)
 }
 
-/// Cast a single ray from `origin` in `direction`, checking for entity and food collisions.
+fn adjacent_contact(
+    exclude_idx: u32,
+    pos: Vec2,
+    arena: &EntityArena,
+    food_positions: &[Vec2],
+    meat_positions: &[Vec2],
+    spatial: &SpatialHash,
+    world: &World,
+    environment: &EnvironmentState,
+) -> bool {
+    let radius = config::SENSOR_ADJACENT_RADIUS;
+    let radius_sq = radius * radius;
+
+    let neighbors = spatial.query_radius_excluding(pos, radius, exclude_idx, world, arena);
+    if !neighbors.is_empty() {
+        return true;
+    }
+
+    if food_positions
+        .iter()
+        .any(|p| world.distance_sq(*p, pos) <= radius_sq)
+    {
+        return true;
+    }
+
+    if meat_positions
+        .iter()
+        .any(|p| world.distance_sq(*p, pos) <= radius_sq)
+    {
+        return true;
+    }
+
+    if point_near_any_wall(pos, &environment.walls, world, radius) {
+        return true;
+    }
+
+    environment
+        .toxic_zones
+        .iter()
+        .any(|zone| world.distance_sq(zone.center, pos) <= zone.radius * zone.radius)
+}
+
+/// Cast a single ray from `origin` in `direction`, checking for entity, food, walls, and hazards.
 fn raycast(
     origin: Vec2,
     direction: Vec2,
@@ -150,25 +249,29 @@ fn raycast(
     exclude_idx: u32,
     arena: &EntityArena,
     food_positions: &[Vec2],
+    meat_positions: &[Vec2],
     spatial: &SpatialHash,
     world: &World,
+    environment: &EnvironmentState,
 ) -> RayHit {
-    // March along ray in discrete steps
     let step_size = 4.0;
     let num_steps = (max_dist / step_size) as usize;
     let entity_hit_radius = config::ENTITY_BASE_RADIUS * 1.5;
     let food_hit_radius = 8.0;
+    let wall_hit_radius = config::WALL_THICKNESS * 0.8;
+    let food_hit_sq = food_hit_radius * food_hit_radius;
+    let wall_hit_sq = wall_hit_radius * wall_hit_radius;
 
     let mut closest_hit = RayHit {
         distance_norm: 1.0,
         hit_type: HitType::Nothing,
+        entity_idx: None,
     };
 
     for step in 1..=num_steps {
         let t = step as f32 * step_size;
         let sample_pos = world.wrap(origin + direction * t);
 
-        // Check entities via spatial hash
         let nearby = spatial.query_radius_excluding(
             sample_pos,
             entity_hit_radius,
@@ -177,40 +280,78 @@ fn raycast(
             arena,
         );
         if !nearby.is_empty() {
-            let norm = t / max_dist;
-            if norm < closest_hit.distance_norm {
-                closest_hit = RayHit {
-                    distance_norm: norm,
-                    hit_type: HitType::Entity,
-                };
-                return closest_hit; // first hit along ray is closest
-            }
-        }
-
-        // Check food (brute force since food count is moderate)
-        for food_pos in food_positions {
-            let dist_sq = world.distance_sq(sample_pos, *food_pos);
-            if dist_sq < food_hit_radius * food_hit_radius {
-                let norm = t / max_dist;
-                if norm < closest_hit.distance_norm {
-                    closest_hit = RayHit {
-                        distance_norm: norm,
-                        hit_type: HitType::Food,
-                    };
-                    return closest_hit;
+            let mut nearest: Option<(usize, f32)> = None;
+            for idx in nearby {
+                if let Some(candidate) = arena.get_by_index(idx as usize) {
+                    let dist_sq = world.distance_sq(sample_pos, candidate.pos);
+                    match nearest {
+                        Some((_, best_dist)) if dist_sq >= best_dist => {}
+                        _ => nearest = Some((idx as usize, dist_sq)),
+                    }
                 }
             }
+
+            if let Some((entity_idx, _)) = nearest {
+                let norm = t / max_dist;
+                return RayHit {
+                    distance_norm: norm,
+                    hit_type: HitType::Entity,
+                    entity_idx: Some(entity_idx),
+                };
+            }
         }
 
-        // Check world bounds (non-toroidal only)
+        if food_positions
+            .iter()
+            .chain(meat_positions.iter())
+            .any(|food_pos| world.distance_sq(sample_pos, *food_pos) < food_hit_sq)
+        {
+            let norm = t / max_dist;
+            return RayHit {
+                distance_norm: norm,
+                hit_type: HitType::Food,
+                entity_idx: None,
+            };
+        }
+
+        for wall in &environment.walls {
+            let cp = closest_point_on_segment(wall.start, wall.end, sample_pos);
+            if world.distance_sq(sample_pos, cp) <= wall_hit_sq {
+                let norm = t / max_dist;
+                return RayHit {
+                    distance_norm: norm,
+                    hit_type: HitType::Wall,
+                    entity_idx: None,
+                };
+            }
+        }
+
+        if environment
+            .toxic_zones
+            .iter()
+            .any(|zone| world.distance_sq(sample_pos, zone.center) <= zone.radius * zone.radius)
+        {
+            let norm = t / max_dist;
+            return RayHit {
+                distance_norm: norm,
+                hit_type: HitType::Hazard,
+                entity_idx: None,
+            };
+        }
+
         if !world.toroidal {
             let raw_pos = origin + direction * t;
-            if raw_pos.x < 0.0 || raw_pos.x > world.width || raw_pos.y < 0.0 || raw_pos.y > world.height {
+            if raw_pos.x < 0.0
+                || raw_pos.x > world.width
+                || raw_pos.y < 0.0
+                || raw_pos.y > world.height
+            {
                 let norm = t / max_dist;
                 if norm < closest_hit.distance_norm {
                     closest_hit = RayHit {
                         distance_norm: norm,
                         hit_type: HitType::Wall,
+                        entity_idx: None,
                     };
                     return closest_hit;
                 }

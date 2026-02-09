@@ -61,3 +61,31 @@ impl World {
         self.delta(a, b).length()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_uses_toroidal_coordinates() {
+        let world = World::new(100.0, 50.0, true);
+        let wrapped = world.wrap(vec2(102.0, -3.0));
+        assert!((wrapped.x - 2.0).abs() < f32::EPSILON);
+        assert!((wrapped.y - 47.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn delta_uses_shortest_toroidal_path() {
+        let world = World::new(100.0, 100.0, true);
+        let d = world.delta(vec2(95.0, 50.0), vec2(5.0, 50.0));
+        assert!((d.x - 10.0).abs() < f32::EPSILON);
+        assert!(d.y.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn distance_matches_shortest_path_length() {
+        let world = World::new(100.0, 100.0, true);
+        let dist = world.distance(vec2(95.0, 50.0), vec2(5.0, 50.0));
+        assert!((dist - 10.0).abs() < f32::EPSILON);
+    }
+}

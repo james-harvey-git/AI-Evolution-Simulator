@@ -85,7 +85,7 @@ impl Default for SignalState {
 /// Update signals and pheromones for all entities.
 pub fn update_signals(
     arena: &EntityArena,
-    signal_intensities: &[f32], // brain output [0,1] per slot
+    signal_colors: &[[f32; 3]], // brain RGB outputs [0,1] per slot
     signals: &mut Vec<SignalState>,
     pheromone_grid: &mut PheromoneGrid,
     dt: f32,
@@ -97,14 +97,18 @@ pub fn update_signals(
 
     for (idx, entity) in arena.entities.iter().enumerate() {
         if let Some(e) = entity {
-            let intensity = if idx < signal_intensities.len() {
-                signal_intensities[idx]
-            } else {
-                0.0
-            };
+            if !e.alive {
+                if idx < signals.len() {
+                    signals[idx] = SignalState::default();
+                }
+                continue;
+            }
+
+            let rgb = signal_colors.get(idx).copied().unwrap_or([0.0, 0.0, 0.0]);
+            let intensity = rgb[0].max(rgb[1]).max(rgb[2]);
 
             signals[idx] = SignalState {
-                color: e.color,
+                color: Color::new(rgb[0], rgb[1], rgb[2], 1.0),
                 intensity,
             };
 
@@ -156,5 +160,52 @@ pub fn draw_pheromone_overlay(grid: &PheromoneGrid, _world: &World) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::{Entity, EntityArena};
+
+    fn test_entity(pos: Vec2) -> Entity {
+        Entity {
+            pos,
+            prev_pos: pos,
+            velocity: vec2(20.0, 0.0),
+            heading: 0.0,
+            radius: crate::config::ENTITY_BASE_RADIUS,
+            color: WHITE,
+            energy: 100.0,
+            carried_energy: 0.0,
+            health: 100.0,
+            max_health: 100.0,
+            age: 0.0,
+            alive: true,
+            speed_multiplier: 1.0,
+            sensor_range: 1.0,
+            metabolic_rate: 1.0,
+            generation_depth: 0,
+            parent_id: None,
+            offspring_count: 0,
+            tick_born: 0,
+        }
+    }
+
+    #[test]
+    fn update_signals_applies_rgb_and_deposits_pheromone() {
+        let mut arena = EntityArena::new(1);
+        arena.spawn(test_entity(vec2(40.0, 40.0))).unwrap();
+
+        let mut signals = Vec::new();
+        let mut grid = PheromoneGrid::new(200.0, 200.0, 20.0);
+        let signal_colors = vec![[0.2, 0.9, 0.4]];
+
+        update_signals(&arena, &signal_colors, &mut signals, &mut grid, 1.0);
+
+        assert_eq!(signals.len(), 1);
+        assert!((signals[0].color.g - 0.9).abs() < 1e-5);
+        assert!((signals[0].intensity - 0.9).abs() < 1e-5);
+        assert!(grid.sample(vec2(40.0, 40.0)) > 0.0);
     }
 }
